@@ -307,23 +307,39 @@ def _text_value(fields: list[str], *, head: str) -> Optional[str]:
 
 
 def _parse_schematic_pin(sub: str) -> Optional[Pin]:
-    """Schematic pin encoding is a long compound record delimited by `^^`.
+    """Schematic pin encoding: a compound `^^`-delimited record.
 
-    Format: `P~show~<hyperlink>~<number>~<x>~<y>~<rot>~<ggeId>~...^^...^^...`
-    We only need pin number, coordinates, and — from an attached net label if
-    any — the net name. Nets on the schematic normally flow via wires so we
-    don't attempt to derive them here yet.
+    Chunk 0 header: `P~show~<hyperlink>~<number>~<x>~<y>~<rot>~<ggeId>~...`
+    Chunk 3 (usually): pin name text — this is the label like `VCC`, `SDA`,
+    `VOUT` that we want to capture for pin-role checks.
+
+    Nets aren't recorded here — schematic nets flow via wire connectivity,
+    not stamped on the pin itself. PCB pads carry the net directly.
     """
-    fields = sub.split("~")
-    if len(fields) < 6:
+    chunks = sub.split("^^")
+    header_fields = chunks[0].split("~")
+    if len(header_fields) < 6:
         return None
-    number = fields[3] if len(fields) > 3 else ""
+    number = header_fields[3] if len(header_fields) > 3 else ""
     try:
-        x = float(fields[4])
-        y = float(fields[5])
+        x = float(header_fields[4])
+        y = float(header_fields[5])
     except ValueError:
         return None
-    return Pin(number=number, net=None, x=x, y=y)
+
+    # The pin's *name* label lives in the third `^^` chunk after the header,
+    # positioned at field index 4 in that chunk. Format:
+    #     `<visible>~<x>~<y>~<rot>~<TEXT>~<align>~<font>~<size>~<colour>`
+    label = ""
+    if len(chunks) >= 4:
+        name_fields = chunks[3].split("~")
+        if len(name_fields) >= 5:
+            candidate = name_fields[4].strip()
+            # The number label sits in chunk 4 with the same layout — filter
+            # numeric-only tokens to avoid picking it up when chunks shift.
+            if candidate and not candidate.isdigit():
+                label = candidate
+    return Pin(number=number, net=None, x=x, y=y, label=label)
 
 
 def _parse_pcb_pad(fields: list[str]) -> Optional[Pin]:

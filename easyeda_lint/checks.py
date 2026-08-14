@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Iterable, Iterator
+from typing import Callable, Iterable, Iterator, Optional
 
 from .models import Component, Document, DocKind
 from . import values
@@ -371,6 +371,166 @@ def rule_find_pads_center_not_connected(doc: Document) -> Iterator[Finding]:
             )
 
 
+# ---------- Tier 4: electrical intent ----------
+
+# Net-name patterns for "this is a power rail" identification.
+# Uppercase matching — user boards have all-caps net names in practice, but
+# we lowercase before comparing to be safe.
+_POWER_NET_TOKENS = (
+    "vcc", "vdd", "vbus", "vbat", "vin", "vout",
+    "vddio", "vdda", "vdd_", "avcc", "avdd", "dvdd", "iovdd",
+    "5v", "3v3", "3.3v", "1v8", "1.8v", "12v", "24v",
+    "pwr", "power",
+)
+
+
+def _is_power_net(net: str) -> bool:
+    """Heuristic: does the net name suggest a power rail (not GND)?
+
+    We deliberately exclude GND-family names — those are handled separately
+    as the reference, not as a rail that needs decoupling.
+    """
+    if not net:
+        return False
+    lc = net.lower()
+    if "gnd" in lc or lc.startswith("agnd") or lc.startswith("dgnd"):
+        return False
+    # Rail names starting with + or - (like +3V3, -5V) are unambiguous.
+    if net[0] in "+-" and any(ch.isdigit() for ch in net):
+        return True
+    return any(tok in lc for tok in _POWER_NET_TOKENS)
+
+
+def _is_gnd_net(net: Optional[str]) -> bool:
+    if not net:
+        return False
+    lc = net.lower()
+    return "gnd" in lc
+
+
+def _is_capacitor(c: Component) -> bool:
+    """Heuristic: is this component a decoupling-capable capacitor?
+
+    Prefers package tag (C0402/C0603/...) because that's unambiguous; falls
+    back to device-string sniffing when the package is generic.
+    """
+    if _PASSIVE_PACKAGE_RE.match(c.package):
+        prefix = c.package.strip()[0].upper()
+        if prefix == "C":
+            return True
+    device_lc = c.device.strip().lower()
+    return device_lc in ("cap", "capacitor") or "cap_" in device_lc
+
+
+def _is_ic_like(c: Component) -> bool:
+    """Heuristic: is this component something that needs decoupling?
+
+    ICs, modules, and multi-terminal devices — but not caps, resistors,
+    diodes, headers, LEDs, or single-transistor packages.
+    """
+    if _is_capacitor(c):
+        return False
+    if _PASSIVE_PACKAGE_RE.match(c.package):
+        return False
+    if len(c.pins) < 3:
+        return False
+    hints = " ".join([c.package, c.device]).lower()
+    non_ic = ("hdr-", "pinheader", "conn-", "key-", "led-", "sot-23-3")
+    if any(h in hints for h in non_ic):
+        return False
+    return True
+
+
+def rule_find_unconnected_ic_pins(doc: Document) -> Iterator[Finding]:
+    """IC pin with no net — the router forgot to wire it up, or the design
+    truly meant to leave it floating and should say so.
+
+    Modules (≥20 pins — ESP32 boards, MCU stamps, WiFi mini-modules) have
+    many GPIOs that are legitimately unused; on those we downgrade to INFO
+    so the fact is visible but doesn't scream. Small ICs still get WARN
+    because unused pins on a 5-pin part are almost always a mistake.
+    """
+    if doc.kind is not DocKind.PCB:
+        return
+    for c in doc.components:
+        if not _is_ic_like(c):
+            continue
+        is_module = len(c.pins) >= 20
+        sev = Severity.INFO if is_module else Severity.WARN
+        for p in c.pins:
+            if not p.net:
+                yield Finding(
+                    severity=sev,
+                    rule="find_unconnected_ic_pins",
+                    message=(
+                        f"pin {p.number} has no net assigned"
+                        + (" — unused module GPIO" if is_module else " — floating input?")
+                    ),
+                    component=c.designator,
+                    where=doc.kind.value,
+                )
+
+
+def rule_find_missing_decoupling(doc: Document) -> Iterator[Finding]:
+    """Every power rail feeding an IC should have at least one decoupling
+    capacitor between it and GND. If the rail has IC consumers but zero
+    caps to GND, flag it — that's a classic \"forgot the bypass\" bug.
+
+    Not proximity-checked in this MVP — we only care that *a* cap exists.
+    A Tier 5 rule can later enforce \"within N mm of the pin.\"
+    """
+    if doc.kind is not DocKind.PCB:
+        return
+
+    # 1. Build the set of power rails that IC pins actually consume.
+    ic_power_nets: set[str] = set()
+    for c in doc.components:
+        if not _is_ic_like(c):
+            continue
+        for p in c.pins:
+            if p.net and _is_power_net(p.net):
+                ic_power_nets.add(p.net)
+
+    if not ic_power_nets:
+        return
+
+    # 2. Build the set of power rails that already have a cap to GND.
+    decoupled: set[str] = set()
+    for c in doc.components:
+        if not _is_capacitor(c):
+            continue
+        nets = [p.net for p in c.pins if p.net]
+        if len(nets) < 2:
+            continue
+        has_gnd = any(_is_gnd_net(n) for n in nets)
+        if not has_gnd:
+            continue
+        for n in nets:
+            if not _is_gnd_net(n) and _is_power_net(n):
+                decoupled.add(n)
+
+    # 3. Flag every IC-consumed power rail without a matching cap.
+    for net in sorted(ic_power_nets - decoupled):
+        # Name the ICs consuming this rail so the finding is actionable.
+        consumers = [
+            (c.designator, p.number)
+            for c in doc.components if _is_ic_like(c)
+            for p in c.pins if p.net == net
+        ]
+        summary = ", ".join(f"{d}:{n}" for d, n in consumers[:3])
+        if len(consumers) > 3:
+            summary += f", … (+{len(consumers) - 3} more)"
+        yield Finding(
+            severity=Severity.WARN,
+            rule="find_missing_decoupling",
+            message=(
+                f"power net {net!r} feeds IC pins ({summary}) but has no "
+                f"capacitor to GND anywhere on the board"
+            ),
+            where=doc.kind.value,
+        )
+
+
 # ---------- registry + entry point ----------
 
 ALL_CHECKS: list[CheckFn] = [
@@ -389,6 +549,9 @@ ALL_CHECKS: list[CheckFn] = [
     rule_find_placeholder_values,
     rule_find_via_antennas,
     rule_find_pads_center_not_connected,
+    # Tier 4
+    rule_find_unconnected_ic_pins,
+    rule_find_missing_decoupling,
 ]
 
 
@@ -397,10 +560,58 @@ ALL_CHECKS: list[CheckFn] = [
 CrossCheckFn = Callable[[Document, Document], Iterator[Finding]]
 
 
+def _match_by_identity(
+    only_sch: set[str],
+    only_pcb: set[str],
+    sch_by_des: dict[str, Component],
+    pcb_by_des: dict[str, Component],
+) -> list[tuple[str, str]]:
+    """Pair unmatched schematic/PCB designators that clearly belong together.
+
+    Two components with different designators but the *same* supplier part
+    number and package are almost certainly a rename (`BATT_CONN` on the
+    schematic, `BATT` on the PCB). Returning those as pairs lets the caller
+    downgrade the noisy "missing on one side" errors to a single "renamed"
+    finding.
+    """
+    def key(c: Component) -> Optional[tuple[str, str]]:
+        if c.supplier_part and c.package:
+            return (c.supplier_part, c.package)
+        if c.manufacturer_part and c.package:
+            return (c.manufacturer_part, c.package)
+        return None
+
+    sch_lookup: dict[tuple[str, str], list[str]] = {}
+    for des in only_sch:
+        k = key(sch_by_des[des])
+        if k:
+            sch_lookup.setdefault(k, []).append(des)
+
+    pairs: list[tuple[str, str]] = []
+    matched_pcb: set[str] = set()
+    for des in only_pcb:
+        k = key(pcb_by_des[des])
+        if not k:
+            continue
+        candidates = sch_lookup.get(k, [])
+        if len(candidates) == 1 and candidates[0] not in matched_pcb:
+            pairs.append((candidates[0], des))
+            matched_pcb.add(candidates[0])
+    return pairs
+
+
 def rule_find_schematic_pcb_mismatch(sch: Document, pcb: Document) -> Iterator[Finding]:
     """Every component in the schematic should have a matching one in the PCB
-    (by designator) and vice versa. Mismatched supplier part numbers are a
-    strong signal a footprint change didn't propagate."""
+    (by designator) and vice versa. Mismatched supplier part numbers or
+    packages between the two sides are a strong signal that a footprint or
+    part change didn't propagate.
+
+    Rename detection: components that appear on only one side but share a
+    supplier part + package with an unmatched component on the other side
+    are treated as a *renamed* pair and reported as a single WARN rather
+    than two ERRORs. Cuts a lot of noise on real boards where designators
+    drift between revisions.
+    """
     if sch.kind is not DocKind.SCHEMATIC or pcb.kind is not DocKind.PCB:
         return
     sch_by_des = {c.designator: c for c in sch.components if c.designator}
@@ -409,24 +620,41 @@ def rule_find_schematic_pcb_mismatch(sch: Document, pcb: Document) -> Iterator[F
     only_sch = set(sch_by_des) - set(pcb_by_des)
     only_pcb = set(pcb_by_des) - set(sch_by_des)
 
-    for des in sorted(only_sch):
+    # Fuzzy-match renamed pairs so we don't double-report them.
+    renamed = _match_by_identity(only_sch, only_pcb, sch_by_des, pcb_by_des)
+    renamed_sch = {a for a, _ in renamed}
+    renamed_pcb = {b for _, b in renamed}
+
+    for sch_des, pcb_des in sorted(renamed):
+        yield Finding(
+            severity=Severity.WARN,
+            rule="find_schematic_pcb_mismatch",
+            message=(
+                f"designator differs between schematic ({sch_des!r}) and PCB "
+                f"({pcb_des!r}) — same part & package suggests one side got renamed"
+            ),
+            component=f"{sch_des} ↔ {pcb_des}",
+            where="schematic↔pcb",
+        )
+
+    for des in sorted(only_sch - renamed_sch):
         yield Finding(
             severity=Severity.ERROR,
             rule="find_schematic_pcb_mismatch",
-            message=f"designator present in schematic but missing from PCB",
+            message="designator present in schematic but missing from PCB",
             component=des,
             where="schematic↔pcb",
         )
-    for des in sorted(only_pcb):
+    for des in sorted(only_pcb - renamed_pcb):
         yield Finding(
             severity=Severity.ERROR,
             rule="find_schematic_pcb_mismatch",
-            message=f"designator present in PCB but missing from schematic",
+            message="designator present in PCB but missing from schematic",
             component=des,
             where="schematic↔pcb",
         )
 
-    # Same designator on both sides — check part-number agreement.
+    # Same designator on both sides — check part-number & package agreement.
     for des in sorted(set(sch_by_des) & set(pcb_by_des)):
         s = sch_by_des[des]
         p = pcb_by_des[des]
@@ -454,8 +682,131 @@ def rule_find_schematic_pcb_mismatch(sch: Document, pcb: Document) -> Iterator[F
             )
 
 
+def rule_find_pin_net_name_mismatches(sch: Document, pcb: Document) -> Iterator[Finding]:
+    """A schematic pin whose *label* says VCC/GND/SDA/SCL but whose PCB *net*
+    doesn't match is very likely a wiring mistake. Common cause: pin swapped
+    on the schematic without re-annotating.
+
+    Only warns on cases where the label is unambiguous (power/ground/I2C).
+    Signal pins with vendor-specific names (\"D2\", \"CLKO\") are ignored.
+    """
+    if sch.kind is not DocKind.SCHEMATIC or pcb.kind is not DocKind.PCB:
+        return
+
+    # Pairs by designator OR by fuzzy-matched rename.
+    sch_by_des = {c.designator: c for c in sch.components if c.designator}
+    pcb_by_des = {c.designator: c for c in pcb.components if c.designator}
+    pairs: list[tuple[Component, Component]] = []
+    for des in set(sch_by_des) & set(pcb_by_des):
+        pairs.append((sch_by_des[des], pcb_by_des[des]))
+    only_sch = set(sch_by_des) - set(pcb_by_des)
+    only_pcb = set(pcb_by_des) - set(sch_by_des)
+    for sch_des, pcb_des in _match_by_identity(only_sch, only_pcb, sch_by_des, pcb_by_des):
+        pairs.append((sch_by_des[sch_des], pcb_by_des[pcb_des]))
+
+    for sch_c, pcb_c in pairs:
+        # Build pin-number → PCB pad-net map for this component.
+        pcb_net_by_num = {p.number: p.net for p in pcb_c.pins}
+        for sp in sch_c.pins:
+            label = sp.label.strip().upper()
+            if not label:
+                continue
+            pcb_net = pcb_net_by_num.get(sp.number)
+            if not pcb_net:
+                continue
+            expected_ok = _pin_label_net_agrees(label, pcb_net)
+            if expected_ok is False:
+                yield Finding(
+                    severity=Severity.WARN,
+                    rule="find_pin_net_name_mismatches",
+                    message=(
+                        f"pin {sp.number} labelled {label!r} in the schematic sits on "
+                        f"PCB net {pcb_net!r} — label and net disagree"
+                    ),
+                    component=sch_c.designator,
+                    where="schematic↔pcb",
+                )
+
+
+import re as _re
+_GPIO_NET_RE = _re.compile(r"\bgpio\d+\b|\bpa\d+\b|\bpb\d+\b|\bpc\d+\b", _re.IGNORECASE)
+
+
+def _looks_like_named_signal(net: str) -> bool:
+    """Does the PCB net name look like a *named signal* (not a power rail)?
+
+    Used to distinguish "this is clearly wrong" from "the net is named after
+    the source component and I can't tell." Boards frequently have net names
+    like `AP2280-3_1` for the AP2280 output — that net carries power, it's
+    just named after the source. We don't flag those. We DO flag when a
+    label like `VCC` lands on something obviously not power.
+    """
+    lc = net.lower()
+    if _GPIO_NET_RE.search(lc):
+        return True
+    signal_tokens = (
+        "sda", "scl", "mosi", "miso", "sclk", "sck", "cs_", "_cs",
+        "reset", "rst", "boot", "irq", "int_",
+        "usb_d", "d+", "d-",
+        "lora_", "wifi_", "ant_",
+        "tx_", "rx_", "_tx", "_rx", "uart_",
+    )
+    return any(tok in lc for tok in signal_tokens)
+
+
+def _pin_label_net_agrees(label: str, net: str) -> Optional[bool]:
+    """Do a schematic pin label and its PCB net agree?
+
+    Returns True if they clearly match, False *only* when the mismatch is
+    unambiguous (e.g. label VCC on a net named GND, or label GND on a
+    positive-voltage net). Returns None when the tool can't tell — many
+    real boards name power nets after the source component (`AP2280-3_1`
+    is the 3V3 rail), and we don't want to raise a warning on every one.
+    """
+    lc_net = net.lower()
+    # Power labels
+    if label in ("VCC", "VDD", "VDDA", "VDDIO", "AVDD", "DVDD", "VBUS", "VBAT", "VIN"):
+        if _is_gnd_net(net):
+            return False
+        if _looks_like_named_signal(net):
+            return False
+        # Otherwise the net could be power (power_net token match OR opaquely
+        # named after the source component). Not a warning.
+        return None
+    # Ground labels
+    if label in ("GND", "AGND", "DGND", "VSS", "GNDA", "GNDD"):
+        if _is_gnd_net(net):
+            return True
+        if _is_power_net(net) or _looks_like_named_signal(net):
+            return False
+        return None
+    # I2C — signal names are usually preserved
+    if label == "SDA":
+        if "sda" in lc_net:
+            return True
+        if _is_gnd_net(net) or _is_power_net(net):
+            return False
+        return None
+    if label == "SCL":
+        if "scl" in lc_net:
+            return True
+        if _is_gnd_net(net) or _is_power_net(net):
+            return False
+        return None
+    # SPI
+    if label in ("MOSI", "MISO", "SCK", "SCLK"):
+        base = label.lower()
+        if base in lc_net:
+            return True
+        if _is_gnd_net(net) or _is_power_net(net):
+            return False
+        return None
+    return None  # unknown label, no opinion
+
+
 CROSS_CHECKS: list[CrossCheckFn] = [
     rule_find_schematic_pcb_mismatch,
+    rule_find_pin_net_name_mismatches,
 ]
 
 

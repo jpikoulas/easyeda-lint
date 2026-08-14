@@ -21,6 +21,7 @@ class Pin:
     net: Optional[str]   # the electrical net this pin is connected to
     x: float
     y: float
+    label: str = ""      # pin name from schematic (e.g. "VCC", "GND", "SDA")
 
 
 @dataclass
