@@ -137,6 +137,16 @@ def _parse_sheet(sheet: dict[str, Any]) -> Optional[Document]:
     editor_version = data.get("head", {}).get("editorVersion", "") \
         if isinstance(data.get("head"), dict) else ""
 
+    # Collate any tracks on the BoardOutLine layer into a single polyline.
+    # EasyEDA typically stores the outline as one long polyline, but if it
+    # was drawn as separate segments we concatenate them in file order —
+    # for the checks that use it (point-in-polygon, edge-clearance), that
+    # gets us close enough without having to reconstruct a strict polygon.
+    board_outline: list[tuple[float, float]] = []
+    for t in tracks:
+        if t.layer == 10:
+            board_outline.extend(t.points)
+
     return Document(
         kind=kind,
         title=title,
@@ -148,6 +158,7 @@ def _parse_sheet(sheet: dict[str, Any]) -> Optional[Document]:
         net_labels=net_labels,
         tracks=tracks,
         vias=vias,
+        board_outline=board_outline,
     )
 
 

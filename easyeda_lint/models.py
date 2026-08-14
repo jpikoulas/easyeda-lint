@@ -119,6 +119,9 @@ class Document:
     # PCB-only geometry
     tracks: list[Track] = field(default_factory=list)
     vias: list[Via] = field(default_factory=list)
+    # PCB board outline — polyline points from the BoardOutLine layer (layer 10).
+    # Empty when the document is a schematic or when the outline isn't defined.
+    board_outline: list[tuple[float, float]] = field(default_factory=list)
     # Provenance
     source_path: str = ""
 

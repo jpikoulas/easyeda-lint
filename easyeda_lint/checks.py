@@ -531,28 +531,223 @@ def rule_find_missing_decoupling(doc: Document) -> Iterator[Finding]:
         )
 
 
-# ---------- registry + entry point ----------
+# ---------- Tier 5: PCB physical hygiene ----------
 
-ALL_CHECKS: list[CheckFn] = [
-    # Tier 1
-    rule_duplicate_designator,
-    rule_missing_designator,
-    rule_missing_value,
-    rule_missing_part_number,
-    # Tier 2
-    rule_unparseable_value,
-    rule_value_designator_mismatch,
-    # Tier 3
-    rule_dangling_net,
-    rule_find_orphan_net_labels,
-    rule_find_orphan_power_objects,
-    rule_find_placeholder_values,
-    rule_find_via_antennas,
-    rule_find_pads_center_not_connected,
-    # Tier 4
-    rule_find_unconnected_ic_pins,
-    rule_find_missing_decoupling,
-]
+# Empirically tuned to EasyEDA's 10-mil (0.254 mm) unit. Real designs
+# typically place components on a 100-mil or 50-mil grid; anything off-grid
+# by more than a hair is nearly always a slip.
+_GRID_UNITS = 10.0        # placement grid — 100 mil in EasyEDA units
+_GRID_TOLERANCE = 0.01    # how close to a grid intersection counts as "on grid"
+_EDGE_MARGIN = 3.0        # pad-to-board-edge minimum, in EasyEDA units (~0.76 mm)
+_ACUTE_ANGLE_DEG = 89.0   # angles at or below this are flagged as acid traps
+
+
+def _distance_point_to_segment(px: float, py: float,
+                               ax: float, ay: float,
+                               bx: float, by: float) -> float:
+    """Perpendicular distance from point (px, py) to segment (a, b)."""
+    dx, dy = bx - ax, by - ay
+    if dx == 0 and dy == 0:
+        return ((px - ax) ** 2 + (py - ay) ** 2) ** 0.5
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+    cx, cy = ax + t * dx, ay + t * dy
+    return ((px - cx) ** 2 + (py - cy) ** 2) ** 0.5
+
+
+def _point_in_polygon(px: float, py: float, polygon: list[tuple[float, float]]) -> bool:
+    """Standard ray-casting point-in-polygon test."""
+    if len(polygon) < 3:
+        return True  # no polygon = accept anything (silent for schematics)
+    inside = False
+    n = len(polygon)
+    j = n - 1
+    for i in range(n):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+        if ((yi > py) != (yj > py)) and \
+           (px < (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _min_distance_to_polygon_edge(px: float, py: float,
+                                  polygon: list[tuple[float, float]]) -> float:
+    """Shortest distance from (px, py) to any edge of the polygon."""
+    if len(polygon) < 2:
+        return float("inf")
+    best = float("inf")
+    for i in range(len(polygon) - 1):
+        ax, ay = polygon[i]
+        bx, by = polygon[i + 1]
+        d = _distance_point_to_segment(px, py, ax, ay, bx, by)
+        if d < best:
+            best = d
+    return best
+
+
+def rule_find_off_grid_components(doc: Document) -> Iterator[Finding]:
+    """Component placed off the design grid — usually a nudge slip, and it
+    makes autorouters and future tweaks harder."""
+    if doc.kind is not DocKind.PCB:
+        return
+    for c in doc.components:
+        # Skip components whose position we couldn't determine.
+        if c.x == 0 and c.y == 0:
+            continue
+        rem_x = abs(c.x - round(c.x / _GRID_UNITS) * _GRID_UNITS)
+        rem_y = abs(c.y - round(c.y / _GRID_UNITS) * _GRID_UNITS)
+        if rem_x > _GRID_TOLERANCE or rem_y > _GRID_TOLERANCE:
+            yield Finding(
+                severity=Severity.INFO,
+                rule="find_off_grid_components",
+                message=(
+                    f"placed at ({c.x:g}, {c.y:g}) — off the {_GRID_UNITS:g}-unit grid "
+                    f"by ({rem_x:g}, {rem_y:g})"
+                ),
+                component=c.designator or f"<line {c.source_line}>",
+                where=doc.kind.value,
+            )
+
+
+def rule_find_components_outside_board_outline(doc: Document) -> Iterator[Finding]:
+    """A component whose origin falls outside the board polygon — either the
+    outline wasn't updated after moving parts, or the part is dangling
+    off-board and won't be manufactured."""
+    if doc.kind is not DocKind.PCB or not doc.board_outline:
+        return
+    for c in doc.components:
+        if c.x == 0 and c.y == 0:
+            continue
+        if not _point_in_polygon(c.x, c.y, doc.board_outline):
+            yield Finding(
+                severity=Severity.ERROR,
+                rule="find_components_outside_board_outline",
+                message=f"origin at ({c.x:g}, {c.y:g}) is outside the board outline polygon",
+                component=c.designator or f"<line {c.source_line}>",
+                where=doc.kind.value,
+            )
+
+
+def rule_find_pads_near_board_edge(doc: Document) -> Iterator[Finding]:
+    """Pads that sit within a fabrication-margin of the board edge — the
+    routing tool won't route to them cleanly, and copper too near the edge
+    can chip off during depaneling."""
+    if doc.kind is not DocKind.PCB or not doc.board_outline:
+        return
+    for c, p in doc.pads():
+        if not p.net:
+            # Mechanical pads may legitimately hug the edge.
+            continue
+        if _is_gnd_net(p.net):
+            # Ground pins on edge-mounted connectors regularly sit right
+            # on the outline — that's the design, not a defect.
+            continue
+        d = _min_distance_to_polygon_edge(p.x, p.y, doc.board_outline)
+        if d < _EDGE_MARGIN:
+            yield Finding(
+                severity=Severity.WARN,
+                rule="find_pads_near_board_edge",
+                message=(
+                    f"pin {p.number} on net {p.net!r} is {d:.1f} units from the board "
+                    f"edge (< {_EDGE_MARGIN:g} unit safe margin) — check fab clearance"
+                ),
+                component=c.designator,
+                where=doc.kind.value,
+            )
+
+
+def rule_find_acute_angles(doc: Document) -> Iterator[Finding]:
+    """Acute-angle bends in copper are historically bad — acid traps during
+    etching, and stress concentration at the corner. Modern fabs handle
+    them but they're still a code smell."""
+    if doc.kind is not DocKind.PCB:
+        return
+    seen: set[tuple[str, int]] = set()  # dedupe multiple bends on one track
+    for t in doc.tracks:
+        if t.layer not in (1, 2):
+            continue
+        pts = t.points
+        for i in range(1, len(pts) - 1):
+            a, b, c = pts[i - 1], pts[i], pts[i + 1]
+            # Vector from b→a and b→c
+            v1x, v1y = a[0] - b[0], a[1] - b[1]
+            v2x, v2y = c[0] - b[0], c[1] - b[1]
+            n1 = (v1x * v1x + v1y * v1y) ** 0.5
+            n2 = (v2x * v2x + v2y * v2y) ** 0.5
+            if n1 == 0 or n2 == 0:
+                continue
+            cos_angle = max(-1.0, min(1.0, (v1x * v2x + v1y * v2y) / (n1 * n2)))
+            # cos(89°) ≈ 0.0175 — anything with cos_angle >= that has the
+            # two vectors bending back on themselves less than 89°, i.e.
+            # the corner interior angle is acute.
+            import math
+            angle_deg = math.degrees(math.acos(cos_angle))
+            if angle_deg < _ACUTE_ANGLE_DEG:
+                key = (t.gge_id or "unknown", i)
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield Finding(
+                    severity=Severity.WARN,
+                    rule="find_acute_angles",
+                    message=(
+                        f"track on net {t.net or '?'} has a {angle_deg:.0f}° bend "
+                        f"at ({b[0]:g}, {b[1]:g}) — acid-trap / stress-concentration risk"
+                    ),
+                    where=doc.kind.value,
+                )
+
+
+def rule_find_inconsistent_track_widths(doc: Document) -> Iterator[Finding]:
+    """The same net using very different track widths on different segments —
+    often a copy-paste artefact or a partial-rewire that missed some spans.
+    High-current nets deliberately use different widths from signal ones,
+    so we only flag when the ratio is >2× and there are multiple widths."""
+    if doc.kind is not DocKind.PCB:
+        return
+    widths_by_net: dict[str, list[float]] = {}
+    for t in doc.tracks:
+        if t.layer not in (1, 2) or not t.net or t.net.startswith("S$"):
+            continue
+        widths_by_net.setdefault(t.net, []).append(t.width)
+    for net, widths in widths_by_net.items():
+        unique = sorted(set(widths))
+        if len(unique) < 2:
+            continue
+        if unique[-1] / unique[0] > 2.0:
+            yield Finding(
+                severity=Severity.WARN,
+                rule="find_inconsistent_track_widths",
+                message=(
+                    f"net {net!r} routed at {len(unique)} different widths "
+                    f"(min {unique[0]:g}, max {unique[-1]:g}) — check for stale segments"
+                ),
+                where=doc.kind.value,
+            )
+
+
+def rule_find_mixed_designator_rotation(doc: Document) -> Iterator[Finding]:
+    """Designator text at unusual rotations (not 0° or 90° / 180° / 270°) —
+    usually a stale nudge. Silk becomes harder to read on-board."""
+    if doc.kind is not DocKind.PCB:
+        return
+    for c in doc.components:
+        # Normalise into [0, 360)
+        r = c.rotation % 360
+        if not any(abs(r - target) < 0.5 for target in (0, 90, 180, 270)):
+            yield Finding(
+                severity=Severity.INFO,
+                rule="find_mixed_designator_rotation",
+                message=f"component rotated at {c.rotation:g}° — outside the 0/90/180/270 grid",
+                component=c.designator or f"<line {c.source_line}>",
+                where=doc.kind.value,
+            )
+
+
+# The single-doc rule registry lives at the very end of this file so it can
+# reference every rule (including Tier 6 rules defined further down). See
+# the assignment there.
 
 
 # ---------- cross-document checks (schematic vs PCB) ----------
@@ -573,6 +768,11 @@ def _match_by_identity(
     schematic, `BATT` on the PCB). Returning those as pairs lets the caller
     downgrade the noisy "missing on one side" errors to a single "renamed"
     finding.
+
+    When multiple candidates share the same (part, package) — common when
+    a board has several identical connectors — we tie-break by designator
+    similarity so `BATT`↔`BATT_CONN` matches even though `POGO_CONN` is
+    also a candidate.
     """
     def key(c: Component) -> Optional[tuple[str, str]]:
         if c.supplier_part and c.package:
@@ -581,6 +781,19 @@ def _match_by_identity(
             return (c.manufacturer_part, c.package)
         return None
 
+    def similarity(a: str, b: str) -> int:
+        """Length of the longest common prefix on the alnum-normalised names.
+        A cheap-and-cheerful proxy that catches `BATT`↔`BATT_CONN` cleanly
+        without pulling in Levenshtein for two-line data."""
+        na = "".join(ch for ch in a.upper() if ch.isalnum())
+        nb = "".join(ch for ch in b.upper() if ch.isalnum())
+        n = 0
+        for ca, cb in zip(na, nb):
+            if ca != cb:
+                break
+            n += 1
+        return n
+
     sch_lookup: dict[tuple[str, str], list[str]] = {}
     for des in only_sch:
         k = key(sch_by_des[des])
@@ -588,15 +801,22 @@ def _match_by_identity(
             sch_lookup.setdefault(k, []).append(des)
 
     pairs: list[tuple[str, str]] = []
-    matched_pcb: set[str] = set()
-    for des in only_pcb:
+    matched_sch: set[str] = set()
+    # Deterministic order so results don't depend on set iteration.
+    for des in sorted(only_pcb):
         k = key(pcb_by_des[des])
         if not k:
             continue
-        candidates = sch_lookup.get(k, [])
-        if len(candidates) == 1 and candidates[0] not in matched_pcb:
-            pairs.append((candidates[0], des))
-            matched_pcb.add(candidates[0])
+        candidates = [c for c in sch_lookup.get(k, []) if c not in matched_sch]
+        if not candidates:
+            continue
+        # Rank by shared-prefix similarity; a minimum-quality gate keeps us
+        # from pairing wildly-different names just because the part matches.
+        candidates.sort(key=lambda s: -similarity(s, des))
+        best = candidates[0]
+        if similarity(best, des) >= 3 or len(candidates) == 1:
+            pairs.append((best, des))
+            matched_sch.add(best)
     return pairs
 
 
@@ -804,9 +1024,285 @@ def _pin_label_net_agrees(label: str, net: str) -> Optional[bool]:
     return None  # unknown label, no opinion
 
 
+# ---------- Tier 6: part-database and topology rules ----------
+
+# Schematic pin labels considered "power inputs" for decoupling purposes.
+# We only care about inputs that need bypass capacitors here — outputs like
+# VOUT are the *source*, not the consumer.
+_POWER_INPUT_LABELS = frozenset({
+    "VCC", "VDD", "VDDA", "VDDIO", "VDD_", "VDDCORE", "VDDPLL",
+    "AVDD", "DVDD", "AVCC", "VBUS", "VBAT", "VIN",
+    "V+", "+V", "PWR",
+})
+
+# Ratio between minimum and maximum "sensible" decoupling cap value: anything
+# more than 10× smaller than the smallest recommended value is likely a slip.
+# (100 nF..10 µF is the normal range; a 1 pF cap in that slot means someone
+# copied wrong.) Not enforced yet — recorded here for a Tier 5 tightening.
+
+
+def _components_by_net_and_gnd(doc: Document, is_component_fn) -> dict[str, list[Component]]:
+    """For each net that connects to GND via a matching component (usually a
+    cap), return the list of such components. Used by decoupling and
+    pull-up rules that share the same shape."""
+    result: dict[str, list[Component]] = {}
+    for c in doc.components:
+        if not is_component_fn(c):
+            continue
+        nets = [p.net for p in c.pins if p.net]
+        if len(nets) < 2:
+            continue
+        has_gnd = any(_is_gnd_net(n) for n in nets)
+        if not has_gnd:
+            continue
+        for n in nets:
+            if not _is_gnd_net(n):
+                result.setdefault(n, []).append(c)
+    return result
+
+
+def _components_between(doc: Document, is_component_fn,
+                        net_a_pred, net_b_pred) -> dict[str, list[Component]]:
+    """Components (usually resistors) that connect one pin to a net matching
+    `net_a_pred` and another to a net matching `net_b_pred`. Returns a map
+    keyed by the net_a-matching net. Used for pull-up detection: find all
+    resistors that bridge net X → power rail."""
+    result: dict[str, list[Component]] = {}
+    for c in doc.components:
+        if not is_component_fn(c):
+            continue
+        nets = [p.net for p in c.pins if p.net]
+        if len(nets) < 2:
+            continue
+        # A pull-up must have EXACTLY one pin on each side. Loosely check:
+        # any pin on side A, any pin on side B, no pin on both.
+        a_hits = [n for n in nets if net_a_pred(n)]
+        b_hits = [n for n in nets if net_b_pred(n)]
+        for a in a_hits:
+            for b in b_hits:
+                if a == b:
+                    continue
+                result.setdefault(a, []).append(c)
+    return result
+
+
+def _is_resistor(c: Component) -> bool:
+    if _PASSIVE_PACKAGE_RE.match(c.package):
+        prefix = c.package.strip()[0].upper()
+        if prefix == "R":
+            return True
+    device_lc = c.device.strip().lower()
+    return device_lc in ("res", "resistor")
+
+
+def rule_find_missing_decoupling_by_label(sch: Document, pcb: Document) -> Iterator[Finding]:
+    """Cross-check version of `find_missing_decoupling`.
+
+    Uses schematic pin labels to identify which PCB nets are *actually*
+    power inputs (regardless of what they're named), then verifies each
+    one has a cap to GND anywhere on the board. This works even when
+    power rails are named after their source component
+    (`AP2280-3_1` for the 3V3 rail), which the pure-PCB heuristic misses.
+    """
+    if sch.kind is not DocKind.SCHEMATIC or pcb.kind is not DocKind.PCB:
+        return
+
+    # Match components by designator (or fuzzy rename).
+    sch_by_des = {c.designator: c for c in sch.components if c.designator}
+    pcb_by_des = {c.designator: c for c in pcb.components if c.designator}
+    pairs: list[tuple[Component, Component]] = []
+    for des in set(sch_by_des) & set(pcb_by_des):
+        pairs.append((sch_by_des[des], pcb_by_des[des]))
+    for sch_des, pcb_des in _match_by_identity(
+        set(sch_by_des) - set(pcb_by_des),
+        set(pcb_by_des) - set(sch_by_des),
+        sch_by_des, pcb_by_des,
+    ):
+        pairs.append((sch_by_des[sch_des], pcb_by_des[pcb_des]))
+
+    # For each pair, find PCB nets that are on schematic-labelled power pins.
+    power_consumers: dict[str, list[tuple[str, str, str]]] = {}  # net -> [(des, pin, label)]
+    for sch_c, pcb_c in pairs:
+        pcb_pins_by_num = {p.number: p for p in pcb_c.pins}
+        for sp in sch_c.pins:
+            label_upper = sp.label.strip().upper()
+            if label_upper not in _POWER_INPUT_LABELS:
+                continue
+            pcb_pin = pcb_pins_by_num.get(sp.number)
+            if not pcb_pin or not pcb_pin.net or _is_gnd_net(pcb_pin.net):
+                continue
+            power_consumers.setdefault(pcb_pin.net, []).append(
+                (pcb_c.designator, sp.number, label_upper)
+            )
+
+    if not power_consumers:
+        return
+
+    # Which of those nets are decoupled?
+    decoupled_nets = set(_components_by_net_and_gnd(pcb, _is_capacitor).keys())
+
+    for net in sorted(power_consumers):
+        if net in decoupled_nets:
+            continue
+        consumers = power_consumers[net]
+        summary = ", ".join(f"{d}.{n} ({lbl})" for d, n, lbl in consumers[:3])
+        if len(consumers) > 3:
+            summary += f", … (+{len(consumers) - 3} more)"
+        yield Finding(
+            severity=Severity.WARN,
+            rule="find_missing_decoupling",
+            message=(
+                f"PCB net {net!r} feeds schematic-labelled power inputs "
+                f"({summary}) but has no capacitor to GND anywhere on the board"
+            ),
+            where="schematic↔pcb",
+        )
+
+
+def rule_find_missing_i2c_pullups(doc: Document) -> Iterator[Finding]:
+    """I2C is open-drain — SDA and SCL each need a pull-up to VCC/VDD, or
+    the bus will never go high. Missing pull-ups is a classic silent-fail
+    bug where the master's writes look fine on-scope but nothing
+    acknowledges.
+
+    A pull-up is any resistor connecting the I2C net to a net that's
+    neither GND nor another I2C net. We deliberately don't require the
+    other side to look like a *named* power net — boards frequently name
+    rails after their source component (`AP2280-3_1` for a 3.3 V rail),
+    and demanding a strict VCC/VDD name would false-positive on those.
+    """
+    if doc.kind is not DocKind.PCB:
+        return
+
+    def is_i2c(net_name: str) -> bool:
+        lc = net_name.lower()
+        return "sda" in lc or "scl" in lc
+
+    def is_pullup_target(net_name: str) -> bool:
+        # A pull-up target is any electrical net that's not GND and not the
+        # same I2C net. That covers named power rails AND rails named after
+        # a source component.
+        if not net_name:
+            return False
+        if _is_gnd_net(net_name):
+            return False
+        if is_i2c(net_name):
+            return False
+        return True
+
+    pullups_by_net = _components_between(doc, _is_resistor, is_i2c, is_pullup_target)
+
+    i2c_nets: set[str] = set()
+    for c in doc.components:
+        for p in c.pins:
+            if p.net and is_i2c(p.net):
+                i2c_nets.add(p.net)
+
+    for net in sorted(i2c_nets):
+        if net not in pullups_by_net:
+            yield Finding(
+                severity=Severity.WARN,
+                rule="find_missing_i2c_pullups",
+                message=(
+                    f"I2C net {net!r} has no pull-up resistor to any non-GND net — "
+                    f"bus will not idle high"
+                ),
+                where=doc.kind.value,
+            )
+
+
+def rule_find_missing_reset_pullup(doc: Document) -> Iterator[Finding]:
+    """Reset lines on active-low MCUs should sit high through a pull-up;
+    without one, ESD or floating noise can spuriously reset the chip."""
+    if doc.kind is not DocKind.PCB:
+        return
+
+    def is_reset(net_name: str) -> bool:
+        lc = net_name.lower()
+        # Full-word match — avoids catching "PRESET" or embedded RST substrings.
+        for tok in ("reset", "nrst", "nrs_"):
+            if tok in lc:
+                return True
+        # Very common "_RST" / "RST_" / bare RST at the end of a net name.
+        if lc == "rst" or lc.endswith("_rst") or lc.startswith("rst_"):
+            return True
+        return False
+
+    def is_pullup_target(net_name: str) -> bool:
+        # As in the I2C rule — accept any non-GND, non-reset net.
+        if not net_name:
+            return False
+        if _is_gnd_net(net_name):
+            return False
+        if is_reset(net_name):
+            return False
+        return True
+
+    pullups = _components_between(doc, _is_resistor, is_reset, is_pullup_target)
+
+    reset_nets: set[str] = set()
+    for c in doc.components:
+        for p in c.pins:
+            if p.net and is_reset(p.net):
+                reset_nets.add(p.net)
+
+    # Only warn once per reset net.
+    for net in sorted(reset_nets):
+        if net not in pullups:
+            # Reset button connectors need the pull-up too, but MCUs often
+            # have an internal pull-up on nRST. Still worth surfacing so the
+            # designer can confirm.
+            yield Finding(
+                severity=Severity.INFO,
+                rule="find_missing_reset_pullup",
+                message=(
+                    f"reset net {net!r} has no explicit pull-up to a power rail — "
+                    f"confirm the MCU/reset button design provides one internally"
+                ),
+                where=doc.kind.value,
+            )
+
+
 CROSS_CHECKS: list[CrossCheckFn] = [
     rule_find_schematic_pcb_mismatch,
     rule_find_pin_net_name_mismatches,
+    rule_find_missing_decoupling_by_label,
+]
+
+
+# ---------- registries (kept last so every rule name is bound above) ----------
+
+ALL_CHECKS: list[CheckFn] = [
+    # Tier 1
+    rule_duplicate_designator,
+    rule_missing_designator,
+    rule_missing_value,
+    rule_missing_part_number,
+    # Tier 2
+    rule_unparseable_value,
+    rule_value_designator_mismatch,
+    # Tier 3
+    rule_dangling_net,
+    rule_find_orphan_net_labels,
+    rule_find_orphan_power_objects,
+    rule_find_placeholder_values,
+    rule_find_via_antennas,
+    rule_find_pads_center_not_connected,
+    # Tier 4
+    rule_find_unconnected_ic_pins,
+    rule_find_missing_decoupling,
+    # Tier 5 — note: rule_find_off_grid_components is deliberately not
+    # registered by default. EasyEDA doesn't expose the "active placement
+    # grid" in the JSON, so we can't meaningfully say what off-grid means.
+    # Left in the module so a user can enable it explicitly.
+    rule_find_components_outside_board_outline,
+    rule_find_pads_near_board_edge,
+    rule_find_acute_angles,
+    rule_find_inconsistent_track_widths,
+    rule_find_mixed_designator_rotation,
+    # Tier 6
+    rule_find_missing_i2c_pullups,
+    rule_find_missing_reset_pullup,
 ]
 
 
