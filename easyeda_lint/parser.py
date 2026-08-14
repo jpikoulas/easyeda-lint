@@ -24,7 +24,17 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
-from .models import Component, DocKind, Document, Pin
+from .models import (
+    Component,
+    DocKind,
+    Document,
+    Junction,
+    NetLabel,
+    Pin,
+    Track,
+    Via,
+    Wire,
+)
 
 
 # ---------- top-level entry ----------
@@ -78,6 +88,11 @@ def _parse_sheet(sheet: dict[str, Any]) -> Optional[Document]:
 
     components: list[Component] = []
     nets: dict[str, list[tuple[str, str]]] = {}
+    wires: list[Wire] = []
+    junctions: list[Junction] = []
+    net_labels: list[NetLabel] = []
+    tracks: list[Track] = []
+    vias: list[Via] = []
 
     for idx, entry in enumerate(shape):
         if not isinstance(entry, str):
@@ -90,8 +105,34 @@ def _parse_sheet(sheet: dict[str, Any]) -> Optional[Document]:
                 for pin in comp.pins:
                     if pin.net:
                         nets.setdefault(pin.net, []).append((comp.designator, pin.number))
-        # Wires, tracks, vias etc. carry net info we could aggregate here later.
-        # For now we lean on LIB pin nets for the graph.
+        elif head == "W":
+            w = _parse_wire(entry)
+            if w is not None:
+                wires.append(w)
+        elif head == "J":
+            j = _parse_junction(entry)
+            if j is not None:
+                junctions.append(j)
+        elif head == "F":
+            f = _parse_flag(entry)
+            if f is not None:
+                net_labels.append(f)
+        elif head == "TRACK":
+            t = _parse_track(entry)
+            if t is not None:
+                tracks.append(t)
+                # Only copper-layer tracks contribute to electrical nets.
+                # Layers 1 (Top), 2 (Bottom), 11 (Multi-Layer) and 21..52
+                # (inner) carry real signals; anything else (silk, paste,
+                # mask, assembly, keepout) is a drawing, not a connection.
+                if t.net and _is_copper_layer(t.layer):
+                    nets.setdefault(t.net, [])
+        elif head == "VIA":
+            v = _parse_via(entry)
+            if v is not None:
+                vias.append(v)
+                if v.net:
+                    nets.setdefault(v.net, [])
 
     editor_version = data.get("head", {}).get("editorVersion", "") \
         if isinstance(data.get("head"), dict) else ""
@@ -102,6 +143,11 @@ def _parse_sheet(sheet: dict[str, Any]) -> Optional[Document]:
         editor_version=editor_version,
         components=components,
         nets=nets,
+        wires=wires,
+        junctions=junctions,
+        net_labels=net_labels,
+        tracks=tracks,
+        vias=vias,
     )
 
 
@@ -295,6 +341,145 @@ def _parse_pcb_pad(fields: list[str]) -> Optional[Pin]:
 
 
 # ---------- helpers ----------
+
+# ---------- non-LIB shape parsing ----------
+
+def _parse_wire(entry: str) -> Optional[Wire]:
+    """Schematic wire: `W~x1 y1 x2 y2 ...~color~width~dashLine~fill~ggeId~vis`.
+
+    The point list is space-separated within field[1]. We tolerate an odd
+    number of tokens by dropping the trailing orphan.
+    """
+    fields = entry.split("~")
+    if len(fields) < 2:
+        return None
+    coords = fields[1].split()
+    points: list[tuple[float, float]] = []
+    for i in range(0, len(coords) - 1, 2):
+        try:
+            points.append((float(coords[i]), float(coords[i + 1])))
+        except ValueError:
+            continue
+    if len(points) < 2:
+        return None
+    gge = next((f for f in fields if f.startswith("gge")), "")
+    return Wire(points=points, gge_id=gge)
+
+
+def _parse_junction(entry: str) -> Optional[Junction]:
+    """Schematic junction: `J~x~y~size~color~ggeId~vis`."""
+    fields = entry.split("~")
+    if len(fields) < 3:
+        return None
+    try:
+        x = float(fields[1])
+        y = float(fields[2])
+    except ValueError:
+        return None
+    gge = next((f for f in fields if f.startswith("gge")), "")
+    return Junction(x=x, y=y, gge_id=gge)
+
+
+def _parse_flag(entry: str) -> Optional[NetLabel]:
+    """Schematic flag / net label / power object.
+
+    Format: `F~part_netLabel_KIND~x~y~rot~ggeId~props~vis^^x~y^^TEXT~color~...`
+
+    We only need position, the KIND (to tell power/ground apart from a plain
+    net label), and the text if we can decode it.
+    """
+    # Split off the multi-part sub-record for the text/label body.
+    main, *rest = entry.split("^^", 2)
+    fields = main.split("~")
+    if len(fields) < 4:
+        return None
+    kind_marker = fields[1] if len(fields) > 1 else ""
+    try:
+        x = float(fields[2])
+        y = float(fields[3])
+    except ValueError:
+        return None
+
+    kind = "net"
+    lower = kind_marker.lower()
+    if "power" in lower or "gnd" in lower or "ground" in lower:
+        kind = "power" if "power" in lower or "vcc" in lower else "ground"
+
+    # The label text usually appears in the third `^^` chunk (index 2 of the
+    # rest split). Best-effort — fall back to empty.
+    text = ""
+    if len(rest) >= 1:
+        # rest[0] may be "x~y" for the anchor; rest[1] starts with the label.
+        for chunk in rest:
+            for tok in chunk.split("~"):
+                if tok and not tok.startswith("#") and not tok.replace(".", "").replace("-", "").isdigit() \
+                   and tok not in ("start", "middle", "end", "central") \
+                   and not tok.startswith("gge") and not tok.startswith("flag_"):
+                    text = tok
+                    break
+            if text:
+                break
+
+    gge = next((f for f in fields if f.startswith("gge")), "")
+    return NetLabel(x=x, y=y, text=text, kind=kind, gge_id=gge)
+
+
+def _parse_track(entry: str) -> Optional[Track]:
+    """PCB copper track: `TRACK~width~layer~net~x1 y1 x2 y2 ...~ggeId~vis`."""
+    fields = entry.split("~")
+    if len(fields) < 5:
+        return None
+    try:
+        width = float(fields[1])
+    except ValueError:
+        width = 0.0
+    try:
+        layer = int(float(fields[2]))
+    except ValueError:
+        layer = 0
+    net = fields[3] or None
+    coords = fields[4].split()
+    points: list[tuple[float, float]] = []
+    for i in range(0, len(coords) - 1, 2):
+        try:
+            points.append((float(coords[i]), float(coords[i + 1])))
+        except ValueError:
+            continue
+    if len(points) < 2:
+        return None
+    gge = next((f for f in fields if f.startswith("gge")), "")
+    return Track(layer=layer, net=net, width=width, points=points, gge_id=gge)
+
+
+def _parse_via(entry: str) -> Optional[Via]:
+    """PCB via: `VIA~x~y~outerDiameter~net~innerRadius~ggeId~vis`."""
+    fields = entry.split("~")
+    if len(fields) < 6:
+        return None
+    try:
+        x = float(fields[1])
+        y = float(fields[2])
+        outer = float(fields[3])
+    except ValueError:
+        return None
+    net = fields[4] or None
+    try:
+        inner = float(fields[5])
+    except ValueError:
+        inner = 0.0
+    gge = next((f for f in fields if f.startswith("gge")), "")
+    return Via(x=x, y=y, outer_diameter=outer, inner_diameter=inner, net=net, gge_id=gge)
+
+
+# ---------- LIB helpers (unchanged) ----------
+
+def _is_copper_layer(layer: int) -> bool:
+    """True for copper layers per EasyEDA's layer numbering:
+    1 = TopLayer, 2 = BottomLayer, 11 = Multi-Layer, 21..52 = Inner1..Inner32.
+    Everything else is silk/paste/mask/assembly/keepout — non-electrical.
+    """
+    return layer in (1, 2, 11) or 21 <= layer <= 52
+
 
 def _is_frame_lib(props: dict[str, str], fields: list[str]) -> bool:
     """A schematic frame LIB carries no real component data — skip it."""

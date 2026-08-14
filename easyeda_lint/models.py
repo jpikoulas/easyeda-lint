@@ -51,6 +51,58 @@ class Component:
 
 
 @dataclass
+class Wire:
+    """A schematic wire — a polyline whose endpoints/vertices should land on
+    something (pad, junction, another wire, or a labelled flag)."""
+    points: list[tuple[float, float]] = field(default_factory=list)
+    gge_id: str = ""
+
+
+@dataclass
+class Junction:
+    """A schematic junction dot at a point where wires cross/T-join."""
+    x: float = 0.0
+    y: float = 0.0
+    gge_id: str = ""
+
+
+@dataclass
+class NetLabel:
+    """A schematic net-name flag or power symbol placed on a wire.
+
+    `kind` distinguishes plain net labels from power/ground objects because
+    the latter carry an implicit net (`GND`, `VCC`, etc.) and different rules
+    apply.
+    """
+    x: float = 0.0
+    y: float = 0.0
+    text: str = ""            # displayed net name, when we can decode it
+    kind: str = "net"         # "net", "power", or "ground"
+    gge_id: str = ""
+
+
+@dataclass
+class Track:
+    """A PCB copper track segment on a specific layer."""
+    layer: int = 0
+    net: Optional[str] = None
+    width: float = 0.0
+    points: list[tuple[float, float]] = field(default_factory=list)
+    gge_id: str = ""
+
+
+@dataclass
+class Via:
+    """A PCB through-hole via connecting layers on a given net."""
+    x: float = 0.0
+    y: float = 0.0
+    outer_diameter: float = 0.0
+    inner_diameter: float = 0.0
+    net: Optional[str] = None
+    gge_id: str = ""
+
+
+@dataclass
 class Document:
     """A parsed EasyEDA file — schematic or PCB."""
     kind: DocKind
@@ -59,6 +111,14 @@ class Document:
     components: list[Component] = field(default_factory=list)
     # Net → list of (component_designator, pin_number) tuples
     nets: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
+    # Schematic-only geometry
+    wires: list[Wire] = field(default_factory=list)
+    junctions: list[Junction] = field(default_factory=list)
+    net_labels: list[NetLabel] = field(default_factory=list)
+    # PCB-only geometry
+    tracks: list[Track] = field(default_factory=list)
+    vias: list[Via] = field(default_factory=list)
+    # Provenance
     source_path: str = ""
 
     def component_by_designator(self, designator: str) -> Optional[Component]:
@@ -66,3 +126,12 @@ class Document:
             if c.designator == designator:
                 return c
         return None
+
+    def pads(self):
+        """Iterate every (component, pin) pad in the document.
+
+        Yields (Component, Pin) pairs; useful for spatial lookups in checks.
+        """
+        for c in self.components:
+            for p in c.pins:
+                yield c, p
