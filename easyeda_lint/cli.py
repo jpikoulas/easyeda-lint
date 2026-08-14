@@ -12,10 +12,37 @@ from .parser import parse_file
 from .report import render_document, render_findings, _c  # type: ignore[attr-defined]
 
 
+EXAMPLES = """\
+examples:
+  easyeda-lint pcb.json
+      Lint a single PCB export.
+
+  easyeda-lint schematic.json pcb.json
+      Lint both files AND run the schematic↔PCB cross-check
+      (designator drift, part-number/package mismatch, pin-label
+      vs net-name disagreements, missing decoupling by pin label).
+
+  easyeda-lint *.json --fail-on warn
+      Also exit non-zero on WARN findings — useful in CI.
+"""
+
+
+class _ArgParserWithExamples(argparse.ArgumentParser):
+    """ArgumentParser that appends usage examples after argument errors so
+    invoking the tool with no files shows the user how to actually use it."""
+
+    def error(self, message: str) -> None:  # type: ignore[override]
+        self.print_usage(sys.stderr)
+        sys.stderr.write(f"{self.prog}: error: {message}\n\n{EXAMPLES}\n")
+        sys.exit(2)
+
+
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(
+    ap = _ArgParserWithExamples(
         prog="easyeda-lint",
         description="Sanity-check EasyEDA schematic and PCB JSON exports.",
+        epilog=EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("files", nargs="+", type=Path,
                     help="One or more EasyEDA JSON files (schematic or PCB).")
