@@ -1,0 +1,13 @@
+{
+  "editorVersion": "6.5.99",
+  "docType": "3",
+  "title": "rename-pcb",
+  "head": { "docType": "3", "editorVersion": "6.5.99" },
+  "shape": [
+    "LIB~100~100~package`R0603`Device`Res`Supplier`LCSC`Supplier Part`C99782`~0~0~ggeR2~1~~yes~yes~~~#@$TEXT~N~100~95~0.6~0~0~3~~1.9685~4.7K~M #@$TEXT~P~100~90~0.6~0~0~3~~1.9685~R2~M #@$PAD~RECT~98~100~1.5~1.5~1~R2_1~1~0~97 99 99 99 99 101 97 101~0~ggePAD1~0~~Y~0~0~0.2~98,100#@$PAD~RECT~102~100~1.5~1.5~1~R2_2~2~0~101 99 103 99 103 101 101 101~0~ggePAD2~0~~Y~0~0~0.2~102,100",
+    "TRACK~1~1~R2_2~102 100 200 100~ggeTRACK1~0",
+    "TRACK~1~10~~50 50 300 50 300 200 50 200 50 50~ggeOUTLINE~0",
+    "VIA~200~100~2~R2_2~1~ggeV1~0",
+    "VIA~250~150~2~~1~ggeV2~0"
+  ]
+}

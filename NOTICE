@@ -1,0 +1,26 @@
+easyeda-lint
+Copyright 2026 John Pikoulas
+
+Licensed under the MIT License (see LICENSE).
+
+
+Attribution — rule-name catalogue
+---------------------------------
+
+The check/rule name vocabulary used by this project — for example
+`find_via_antennas`, `find_pads_center_not_connected`,
+`find_orphan_net_labels`, `find_missing_decoupling`,
+`find_designator_collisions`, and the general `find_*` style — is
+adopted from the LINT_AUDIT_LIST catalogue in salitronic/eda-agent
+(https://github.com/salitronic/eda-agent), which is licensed under the
+Apache License, Version 2.0.
+
+We use their names deliberately so that anyone familiar with eda-agent
+finds a recognisable vocabulary here. Rule implementations are
+independent work: eda-agent drives live sessions of Altium, KiCad, or
+EasyEDA Pro via an MCP server, whereas easyeda-lint parses EasyEDA
+Standard JSON exports offline. No Apache-2.0 code from eda-agent is
+redistributed in this project.
+
+A copy of the Apache-2.0 license text is available at
+https://www.apache.org/licenses/LICENSE-2.0.

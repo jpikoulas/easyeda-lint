@@ -1,41 +1,177 @@
 # easyeda-lint
 
-Sanity-check EasyEDA schematic and PCB JSON exports before fabrication.
+[![CI](https://github.com/jpikoulas/easyeda-lint/actions/workflows/tests.yml/badge.svg)](https://github.com/jpikoulas/easyeda-lint/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-The goal is a fast "did I forget anything, are the values right, is anything weird"
-pass that runs on the raw EasyEDA JSON. It doesn't replace a proper DRC — it catches
-the class of mistakes that DRC misses: naming inconsistencies, orphaned nets,
-suspicious values, and human-eye-fatigue-slips.
+**Sanity-check EasyEDA schematic and PCB JSON exports before you order the board.**
 
-## What it checks (MVP)
+A fast offline linter for [EasyEDA Standard](https://easyeda.com/) designs. Parses
+the JSON export, lists every component with values and part numbers, and runs a
+growing catalogue of rules that catch the class of mistake that DRC misses:
+naming inconsistencies, orphan nets, missing decoupling caps, drifted designators
+between schematic and PCB, and so on.
 
-**Tier 1 — topology, always run:**
-- Every component listed with designator, value, package, part number
-- Nets with only one pad (dangling)
-- Duplicate reference designators
-- Components with missing value/package/part fields
-- Schematic components without a corresponding PCB footprint (when both files given)
+> **Status: alpha.** Tested against a handful of real boards. False positives are
+> possible; issues and PRs welcome. The rule catalogue grows one entry per bug
+> found on a real design.
 
-**Tier 2 — naming/consistency:**
-- Value field parses as a real electrical value (`100nF`, `10K`, `4.7uF`)
-- Designator's implied type matches value type (e.g. designator hints at a cap → value looks like capacitance)
-- Value-vs-designator label mismatch (e.g. designator `1NF` but value `100nF`)
+## Why
 
-## What it does NOT do
+EasyEDA has built-in DRC (physical clearance) and ERC (electrical rules), and
+they're useful. But they miss whole classes of design mistake:
 
-- Physical DRC (trace-width, clearance) — that's EasyEDA's job
-- Simulation
-- Counterfeit-part detection (a real one caught us on the M5Stamp soil sensor
-  board — no tool would have flagged it; buy from Mouser/Farnell/Digi-Key)
+- The reference-designator `1NF` on a capacitor whose value field says `100nF`.
+- A power rail named after its source component (`U3_1`) rather than what it
+  actually is (`3V3`) — so no automated tool notices when the decoupling cap
+  is missing.
+- Designator drift between schematic and PCB (`BATT_CONN` on the schematic,
+  `BATT` on the PCB) that silently breaks BOM/netlist tooling downstream.
+- The via that was orphaned when the trace above it got rerouted, and nothing
+  ever cleaned it up.
 
-## Usage
+`easyeda-lint` is a git-friendly, CI-friendly text tool you can run before
+pressing **Order**. Runs in under a second on any real board.
+
+## Install
 
 ```bash
-python -m easyeda_lint path/to/schematic.json
-python -m easyeda_lint path/to/pcb.json
-python -m easyeda_lint path/to/schematic.json path/to/pcb.json  # cross-check
+pip install easyeda-lint
 ```
 
-## Status
+Or from source:
 
-Early. Adding rules as they catch real issues on my own boards.
+```bash
+git clone https://github.com/jpikoulas/easyeda-lint
+cd easyeda-lint
+pip install -e .
+```
+
+Python 3.10 or newer. No runtime dependencies outside the standard library.
+
+## Quick start
+
+```bash
+# Lint a single PCB export
+easyeda-lint pcb.json
+
+# Lint schematic + PCB together (runs cross-checks between them)
+easyeda-lint schematic.json pcb.json
+
+# CI usage — exit non-zero on WARN findings too
+easyeda-lint *.json --fail-on warn
+```
+
+Also runnable as a module:
+
+```bash
+python -m easyeda_lint schematic.json pcb.json
+```
+
+### Getting the JSON
+
+In EasyEDA Standard: **File → EasyEDA File Source** or **Document → Save
+Source File** exports the JSON representation of the current schematic or PCB.
+Point `easyeda-lint` at those files.
+
+## Fix mode (v0.2)
+
+`--fix` can auto-correct a narrow, safe subset of findings. Schematic is
+treated as the source of truth; the PCB is what gets rewritten.
+
+```bash
+# DRY-RUN — show what would change, write nothing
+easyeda-lint schematic.json pcb.json --fix
+
+# Actually write the corrections
+easyeda-lint schematic.json pcb.json --fix --apply
+```
+
+Output goes to `<input>.fixed.json`; the original PCB is never overwritten.
+After writing, the fixed file is re-linted and the run fails (deleting the
+output) if any new finding appears — a broken fix should never survive.
+
+Two categories, both enabled by default. Filter with a comma-separated list:
+
+| Category | What it does |
+|----------|--------------|
+| `orphan-vias` | Delete vias with no net and no track anywhere near them — the debris left behind by re-routing. |
+| `sync-rename-pairs` | When the cross-check finds a designator drift (same part & package, only-candidate on each side), rewrite the PCB to match the schematic. Auto-generated net names of the form `<old>_<n>` follow the rename. |
+
+```bash
+easyeda-lint sch.json pcb.json --fix orphan-vias --apply       # only orphan vias
+easyeda-lint sch.json pcb.json --fix sync-rename-pairs --apply # only renames
+```
+
+Everything else — missing values, missing decoupling, package drift, unrouted
+pins — stays report-only. Those need human judgement, and a linter that
+guesses wrong is worse than one that just tells you.
+
+## Example output
+
+```
+PCB: (untitled)  —  ./my_board.json  [EasyEDA 6.5.57]
+
+Components:
+Designator                Value       Package       Device            Supplier Part   Pins
+------------------------  ----------  ------------  ----------------  --------------  -----
+C1                        100nF       C0402         CAP_0402          C1525           2
+R1                        4.7K        R0603         Res_0603          C99782          2
+U1                        LM358       SOIC-8        LM358DR2G         C7950           8
+
+Nets:  4 named net(s), 12 pad connections
+
+Findings:
+WARN (1)
+  [value-designator-mismatch] 1NF: designator '1NF' implies 1 nF, value '100nF' parses as 100 nF
+
+SCHEMATIC ↔ PCB cross-check
+WARN (1)
+  [find_schematic_pcb_mismatch] BATT_CONN ↔ BATT: designator differs between schematic and PCB — same part & package suggests one side got renamed
+```
+
+## What it checks
+
+Rules are organised in tiers by ambition; every tier is enabled by default.
+
+| Tier | Focus | Example rules |
+|------|-------|---------------|
+| 1 | Component listing & basic hygiene | `duplicate-designator`, `missing-value`, `no-part-number` |
+| 2 | Value & naming consistency | `unparseable-value`, `value-designator-mismatch` |
+| 3 | Geometry & topology | `find_orphan_net_labels`, `find_via_antennas`, `find_pads_center_not_connected` |
+| 4 | Electrical intent | `find_unconnected_ic_pins`, `find_missing_decoupling` |
+| 5 | PCB physical hygiene | `find_components_outside_board_outline`, `find_pads_near_board_edge`, `find_acute_angles` |
+| 6 | Cross-file & topology-aware | `find_missing_decoupling_by_label` (cross-check), `find_missing_i2c_pullups`, `find_missing_reset_pullup` |
+
+The rule *names* follow the convention established by
+[salitronic/eda-agent](https://github.com/salitronic/eda-agent) so folks
+coming from that tool find them familiar. Implementations are independent
+(see [NOTICE](NOTICE)).
+
+Some rules ship implemented-but-not-registered when EasyEDA's JSON doesn't
+give us enough signal to avoid noise (e.g. `find_off_grid_components` needs
+the active placement grid which the format doesn't expose). Enable those
+manually in your own script if you know your grid.
+
+## What it is NOT
+
+- Not a replacement for EasyEDA's built-in DRC (physical clearance /
+  manufacturing rules) — run that too.
+- Not a simulator.
+- Not a counterfeit-part detector — buy your chips from Mouser, Farnell, or
+  Digi-Key, not AliExpress.
+- Not tied to a live CAD app (unlike eda-agent, which needs Altium, KiCad,
+  or EasyEDA Pro running).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Short version: adding a new rule is 5–20 lines. Write a function, register it
+in `ALL_CHECKS` (or `CROSS_CHECKS`), add a test case with a fixture that
+triggers it. When you find a new class of mistake on your own board that this
+tool didn't catch, that's a rule waiting to be written.
+
+## License
+
+MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from .models import (
     Component,
@@ -35,7 +35,6 @@ from .models import (
     Via,
     Wire,
 )
-
 
 # ---------- top-level entry ----------
 
@@ -70,7 +69,7 @@ def _parse_root(raw: dict[str, Any]) -> list[Document]:
     return [doc] if doc is not None else []
 
 
-def _parse_sheet(sheet: dict[str, Any]) -> Optional[Document]:
+def _parse_sheet(sheet: dict[str, Any]) -> Document | None:
     """Parse a schematic sheet or PCB. `dataStr` wrapper is unwrapped if present."""
     if "dataStr" in sheet:
         data = sheet["dataStr"]
@@ -118,7 +117,7 @@ def _parse_sheet(sheet: dict[str, Any]) -> Optional[Document]:
             if f is not None:
                 net_labels.append(f)
         elif head == "TRACK":
-            t = _parse_track(entry)
+            t = _parse_track(entry, source_line=idx)
             if t is not None:
                 tracks.append(t)
                 # Only copper-layer tracks contribute to electrical nets.
@@ -128,7 +127,7 @@ def _parse_sheet(sheet: dict[str, Any]) -> Optional[Document]:
                 if t.net and _is_copper_layer(t.layer):
                     nets.setdefault(t.net, [])
         elif head == "VIA":
-            v = _parse_via(entry)
+            v = _parse_via(entry, source_line=idx)
             if v is not None:
                 vias.append(v)
                 if v.net:
@@ -173,7 +172,7 @@ def _doc_kind(doc_type: str) -> DocKind:
 
 # ---------- LIB parsing ----------
 
-def _parse_lib(entry: str, *, source_line: int, kind: DocKind) -> Optional[Component]:
+def _parse_lib(entry: str, *, source_line: int, kind: DocKind) -> Component | None:
     """Turn a LIB shape string into a Component.
 
     Sub-shapes are glued to the LIB header with `#@$` — split those off first,
@@ -289,7 +288,7 @@ _STYLING_TOKENS = frozenset({
 })
 
 
-def _text_value(fields: list[str], *, head: str) -> Optional[str]:
+def _text_value(fields: list[str], *, head: str) -> str | None:
     """Extract the human-readable text from a text sub-shape.
 
     Layout depends on which sub-shape header we're in:
@@ -317,7 +316,7 @@ def _text_value(fields: list[str], *, head: str) -> Optional[str]:
     return None
 
 
-def _parse_schematic_pin(sub: str) -> Optional[Pin]:
+def _parse_schematic_pin(sub: str) -> Pin | None:
     """Schematic pin encoding: a compound `^^`-delimited record.
 
     Chunk 0 header: `P~show~<hyperlink>~<number>~<x>~<y>~<rot>~<ggeId>~...`
@@ -353,7 +352,7 @@ def _parse_schematic_pin(sub: str) -> Optional[Pin]:
     return Pin(number=number, net=None, x=x, y=y, label=label)
 
 
-def _parse_pcb_pad(fields: list[str]) -> Optional[Pin]:
+def _parse_pcb_pad(fields: list[str]) -> Pin | None:
     """PCB pad encoding: `PAD~SHAPE~x~y~w~h~layer~net~pin_number~hole~...`."""
     if len(fields) < 9:
         return None
@@ -371,7 +370,7 @@ def _parse_pcb_pad(fields: list[str]) -> Optional[Pin]:
 
 # ---------- non-LIB shape parsing ----------
 
-def _parse_wire(entry: str) -> Optional[Wire]:
+def _parse_wire(entry: str) -> Wire | None:
     """Schematic wire: `W~x1 y1 x2 y2 ...~color~width~dashLine~fill~ggeId~vis`.
 
     The point list is space-separated within field[1]. We tolerate an odd
@@ -393,7 +392,7 @@ def _parse_wire(entry: str) -> Optional[Wire]:
     return Wire(points=points, gge_id=gge)
 
 
-def _parse_junction(entry: str) -> Optional[Junction]:
+def _parse_junction(entry: str) -> Junction | None:
     """Schematic junction: `J~x~y~size~color~ggeId~vis`."""
     fields = entry.split("~")
     if len(fields) < 3:
@@ -407,7 +406,7 @@ def _parse_junction(entry: str) -> Optional[Junction]:
     return Junction(x=x, y=y, gge_id=gge)
 
 
-def _parse_flag(entry: str) -> Optional[NetLabel]:
+def _parse_flag(entry: str) -> NetLabel | None:
     """Schematic flag / net label / power object.
 
     Format: `F~part_netLabel_KIND~x~y~rot~ggeId~props~vis^^x~y^^TEXT~color~...`
@@ -451,7 +450,7 @@ def _parse_flag(entry: str) -> Optional[NetLabel]:
     return NetLabel(x=x, y=y, text=text, kind=kind, gge_id=gge)
 
 
-def _parse_track(entry: str) -> Optional[Track]:
+def _parse_track(entry: str, *, source_line: int = -1) -> Track | None:
     """PCB copper track: `TRACK~width~layer~net~x1 y1 x2 y2 ...~ggeId~vis`."""
     fields = entry.split("~")
     if len(fields) < 5:
@@ -475,10 +474,13 @@ def _parse_track(entry: str) -> Optional[Track]:
     if len(points) < 2:
         return None
     gge = next((f for f in fields if f.startswith("gge")), "")
-    return Track(layer=layer, net=net, width=width, points=points, gge_id=gge)
+    return Track(
+        layer=layer, net=net, width=width, points=points, gge_id=gge,
+        source_line=source_line,
+    )
 
 
-def _parse_via(entry: str) -> Optional[Via]:
+def _parse_via(entry: str, *, source_line: int = -1) -> Via | None:
     """PCB via: `VIA~x~y~outerDiameter~net~innerRadius~ggeId~vis`."""
     fields = entry.split("~")
     if len(fields) < 6:
@@ -495,7 +497,10 @@ def _parse_via(entry: str) -> Optional[Via]:
     except ValueError:
         inner = 0.0
     gge = next((f for f in fields if f.startswith("gge")), "")
-    return Via(x=x, y=y, outer_diameter=outer, inner_diameter=inner, net=net, gge_id=gge)
+    return Via(
+        x=x, y=y, outer_diameter=outer, inner_diameter=inner,
+        net=net, gge_id=gge, source_line=source_line,
+    )
 
 
 # ---------- LIB helpers (unchanged) ----------

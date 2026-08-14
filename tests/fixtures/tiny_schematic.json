@@ -1,0 +1,12 @@
+{
+  "editorVersion": "6.5.99",
+  "docType": "1",
+  "title": "tiny-fixture-schematic",
+  "head": { "docType": "1", "editorVersion": "6.5.99" },
+  "shape": [
+    "LIB~200~-200~package`R0603`Device`Res`Supplier`LCSC`Supplier Part`C99782`~0~0~ggeR1~1~~yes~yes~~~#@$T~N~200~-190~0~#000080~Arial~6.5pt~5~~text-after-edge~comment~4.7K~1~start~ggeN1~0~pinpart#@$T~P~200~-210~0~#000080~Arial~6.5pt~5~~text-after-edge~comment~R1~1~start~ggeP1~0~pinpart",
+    "LIB~300~-200~package`C0603`Device`CAP`Supplier`LCSC`Supplier Part`C1525`~0~0~ggeC1~1~~yes~yes~~~#@$T~N~300~-190~0~#000080~Arial~6.5pt~5~~text-after-edge~comment~100nF~1~start~ggeN2~0~pinpart#@$T~P~300~-210~0~#000080~Arial~6.5pt~5~~text-after-edge~comment~C1~1~start~ggeP2~0~pinpart",
+    "W~200 -200 300 -200~#008800~1~0~none~ggeW1~0",
+    "J~250~-200~2.5~#CC0000~ggeJ1~0"
+  ]
+}

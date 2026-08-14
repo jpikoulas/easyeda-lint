@@ -13,7 +13,6 @@ from __future__ import annotations
 from .checks import Finding, Severity
 from .models import Document
 
-
 # --------- ANSI colour ----------
 
 def _c(code: str, s: str) -> str:

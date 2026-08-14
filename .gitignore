@@ -12,3 +12,13 @@ dist/
 .DS_Store
 .vscode/
 .idea/
+.coverage
+htmlcov/
+
+# Private board files a user may drop in the repo root while iterating
+# on their own designs (this is the tool's home, not their PCB library).
+# Test fixtures live under tests/fixtures/ and are never named this way,
+# so those aren't caught by these patterns.
+/SCH_*.json
+/PCB_*.json
+/*.fixed.json

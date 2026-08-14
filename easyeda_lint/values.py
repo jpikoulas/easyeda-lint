@@ -17,7 +17,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
 
 
 class UnitKind(str, Enum):
@@ -95,7 +94,7 @@ _COMMA_RE = re.compile(
 )
 
 
-def parse(value: str) -> Optional[ParsedValue]:
+def parse(value: str) -> ParsedValue | None:
     """Return a ParsedValue if `value` looks like an electrical quantity, else None."""
     if not value or not isinstance(value, str):
         return None

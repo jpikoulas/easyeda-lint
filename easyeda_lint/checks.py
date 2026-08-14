@@ -11,13 +11,14 @@ kebab-case slug.
 """
 from __future__ import annotations
 
+import re
 from collections import Counter
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Iterable, Iterator, Optional
 
-from .models import Component, Document, DocKind
 from . import values
+from .models import Component, DocKind, Document
 
 
 class Severity(str, Enum):
@@ -209,8 +210,7 @@ def _wire_endpoints(doc: Document) -> Iterable[tuple[float, float]]:
 def _all_wire_vertices(doc: Document) -> Iterable[tuple[float, float]]:
     """Every vertex of every wire (endpoints AND interior corners)."""
     for w in doc.wires:
-        for pt in w.points:
-            yield pt
+        yield from w.points
 
 
 def _pad_positions(doc: Document) -> Iterable[tuple[float, float]]:
@@ -401,7 +401,7 @@ def _is_power_net(net: str) -> bool:
     return any(tok in lc for tok in _POWER_NET_TOKENS)
 
 
-def _is_gnd_net(net: Optional[str]) -> bool:
+def _is_gnd_net(net: str | None) -> bool:
     if not net:
         return False
     lc = net.lower()
@@ -774,7 +774,7 @@ def _match_by_identity(
     similarity so `BATT`↔`BATT_CONN` matches even though `POGO_CONN` is
     also a candidate.
     """
-    def key(c: Component) -> Optional[tuple[str, str]]:
+    def key(c: Component) -> tuple[str, str] | None:
         if c.supplier_part and c.package:
             return (c.supplier_part, c.package)
         if c.manufacturer_part and c.package:
@@ -788,7 +788,7 @@ def _match_by_identity(
         na = "".join(ch for ch in a.upper() if ch.isalnum())
         nb = "".join(ch for ch in b.upper() if ch.isalnum())
         n = 0
-        for ca, cb in zip(na, nb):
+        for ca, cb in zip(na, nb, strict=False):
             if ca != cb:
                 break
             n += 1
@@ -948,8 +948,7 @@ def rule_find_pin_net_name_mismatches(sch: Document, pcb: Document) -> Iterator[
                 )
 
 
-import re as _re
-_GPIO_NET_RE = _re.compile(r"\bgpio\d+\b|\bpa\d+\b|\bpb\d+\b|\bpc\d+\b", _re.IGNORECASE)
+_GPIO_NET_RE = re.compile(r"\bgpio\d+\b|\bpa\d+\b|\bpb\d+\b|\bpc\d+\b", re.IGNORECASE)
 
 
 def _looks_like_named_signal(net: str) -> bool:
@@ -957,9 +956,9 @@ def _looks_like_named_signal(net: str) -> bool:
 
     Used to distinguish "this is clearly wrong" from "the net is named after
     the source component and I can't tell." Boards frequently have net names
-    like `AP2280-3_1` for the AP2280 output — that net carries power, it's
-    just named after the source. We don't flag those. We DO flag when a
-    label like `VCC` lands on something obviously not power.
+    like `U3_1` for the output of a load switch or LDO — that net carries
+    power, it's just named after the source. We don't flag those. We DO flag
+    when a label like `VCC` lands on something obviously not power.
     """
     lc = net.lower()
     if _GPIO_NET_RE.search(lc):
@@ -974,13 +973,13 @@ def _looks_like_named_signal(net: str) -> bool:
     return any(tok in lc for tok in signal_tokens)
 
 
-def _pin_label_net_agrees(label: str, net: str) -> Optional[bool]:
+def _pin_label_net_agrees(label: str, net: str) -> bool | None:
     """Do a schematic pin label and its PCB net agree?
 
     Returns True if they clearly match, False *only* when the mismatch is
     unambiguous (e.g. label VCC on a net named GND, or label GND on a
     positive-voltage net). Returns None when the tool can't tell — many
-    real boards name power nets after the source component (`AP2280-3_1`
+    real boards name power nets after the source component (e.g. `U3_1`
     is the 3V3 rail), and we don't want to raise a warning on every one.
     """
     lc_net = net.lower()
@@ -1102,7 +1101,8 @@ def rule_find_missing_decoupling_by_label(sch: Document, pcb: Document) -> Itera
     power inputs (regardless of what they're named), then verifies each
     one has a cap to GND anywhere on the board. This works even when
     power rails are named after their source component
-    (`AP2280-3_1` for the 3V3 rail), which the pure-PCB heuristic misses.
+    (e.g. `U3_1` for a 3.3 V rail out of a load switch), which the
+    pure-PCB heuristic misses.
     """
     if sch.kind is not DocKind.SCHEMATIC or pcb.kind is not DocKind.PCB:
         return
@@ -1168,8 +1168,9 @@ def rule_find_missing_i2c_pullups(doc: Document) -> Iterator[Finding]:
     A pull-up is any resistor connecting the I2C net to a net that's
     neither GND nor another I2C net. We deliberately don't require the
     other side to look like a *named* power net — boards frequently name
-    rails after their source component (`AP2280-3_1` for a 3.3 V rail),
-    and demanding a strict VCC/VDD name would false-positive on those.
+    rails after their source component (e.g. `U3_1` for a 3.3 V rail
+    out of a load switch), and demanding a strict VCC/VDD name would
+    false-positive on those.
     """
     if doc.kind is not DocKind.PCB:
         return
@@ -1321,8 +1322,6 @@ def run_all(doc: Document) -> list[Finding]:
 
 
 # ---------- helpers ----------
-
-import re
 
 # Strict passive detection: the *package* names give the cleanest signal.
 # R0402 / C0603 / L0603 unambiguously identify passive footprints, and any

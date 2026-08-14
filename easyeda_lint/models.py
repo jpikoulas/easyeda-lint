@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
 
 
 class DocKind(str, Enum):
@@ -18,7 +17,7 @@ class DocKind(str, Enum):
 @dataclass
 class Pin:
     number: str          # "1", "2", ... (schematic) or pad name (PCB)
-    net: Optional[str]   # the electrical net this pin is connected to
+    net: str | None   # the electrical net this pin is connected to
     x: float
     y: float
     label: str = ""      # pin name from schematic (e.g. "VCC", "GND", "SDA")
@@ -27,10 +26,10 @@ class Pin:
 @dataclass
 class Component:
     """A single instance placed on schematic or PCB."""
-    designator: str = ""            # e.g. "1UF-1", "R3", "AP2280-DRV8833"
+    designator: str = ""            # e.g. "1UF-1", "R3", "U1"
     value: str = ""                 # e.g. "100nF", "10K"
     package: str = ""               # e.g. "C0603", "SOT-23-5_..."
-    device: str = ""                # e.g. "CAP", "Res", "AP2280-2WG-7"
+    device: str = ""                # e.g. "CAP", "Res", "LM358DR2G"
     manufacturer: str = ""
     manufacturer_part: str = ""
     supplier: str = ""              # usually "LCSC"
@@ -86,10 +85,11 @@ class NetLabel:
 class Track:
     """A PCB copper track segment on a specific layer."""
     layer: int = 0
-    net: Optional[str] = None
+    net: str | None = None
     width: float = 0.0
     points: list[tuple[float, float]] = field(default_factory=list)
     gge_id: str = ""
+    source_line: int = -1           # index in the shape array; used by --fix
 
 
 @dataclass
@@ -99,8 +99,9 @@ class Via:
     y: float = 0.0
     outer_diameter: float = 0.0
     inner_diameter: float = 0.0
-    net: Optional[str] = None
+    net: str | None = None
     gge_id: str = ""
+    source_line: int = -1           # index in the shape array; used by --fix
 
 
 @dataclass
@@ -125,7 +126,7 @@ class Document:
     # Provenance
     source_path: str = ""
 
-    def component_by_designator(self, designator: str) -> Optional[Component]:
+    def component_by_designator(self, designator: str) -> Component | None:
         for c in self.components:
             if c.designator == designator:
                 return c

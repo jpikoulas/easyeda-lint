@@ -1,0 +1,9 @@
+{
+  "editorVersion": "6.5.99",
+  "docType": "1",
+  "title": "rename-schematic",
+  "head": { "docType": "1", "editorVersion": "6.5.99" },
+  "shape": [
+    "LIB~200~-200~package`R0603`Device`Res`Supplier`LCSC`Supplier Part`C99782`~0~0~ggeR1~1~~yes~yes~~~#@$T~N~200~-190~0~#000080~Arial~6.5pt~5~~text-after-edge~comment~4.7K~1~start~ggeN1~0~pinpart#@$T~P~200~-210~0~#000080~Arial~6.5pt~5~~text-after-edge~comment~R1~1~start~ggeP1~0~pinpart"
+  ]
+}

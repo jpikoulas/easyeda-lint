@@ -1,0 +1,13 @@
+{
+  "editorVersion": "6.5.99",
+  "docType": "3",
+  "title": "tiny-fixture-pcb",
+  "head": { "docType": "3", "editorVersion": "6.5.99" },
+  "shape": [
+    "LIB~100~100~package`R0603`Device`Res`Supplier`LCSC`Supplier Part`C99782`~0~0~ggeR1~1~~yes~yes~~~#@$TEXT~N~100~95~0.6~0~0~3~~1.9685~4.7K~M ...#@$TEXT~P~100~90~0.6~0~0~3~~1.9685~R1~M ...#@$PAD~RECT~98~100~1.5~1.5~1~SDA~1~0~97 99 99 99 99 101 97 101~0~ggePAD1~0~~Y~0~0~0.2~98,100#@$PAD~RECT~102~100~1.5~1.5~1~VCC~2~0~101 99 103 99 103 101 101 101~0~ggePAD2~0~~Y~0~0~0.2~102,100",
+    "LIB~200~100~package`C0603`Device`CAP`Supplier`LCSC`Supplier Part`C1525`~0~0~ggeC1~1~~yes~yes~~~#@$TEXT~N~200~95~0.6~0~0~3~~1.9685~100nF~M ...#@$TEXT~P~200~90~0.6~0~0~3~~1.9685~C1~M ...#@$PAD~RECT~198~100~1.5~1.5~1~VCC~1~0~197 99 199 99 199 101 197 101~0~ggePAD3~0~~Y~0~0~0.2~198,100#@$PAD~RECT~202~100~1.5~1.5~1~GND~2~0~201 99 203 99 203 101 201 101~0~ggePAD4~0~~Y~0~0~0.2~202,100",
+    "TRACK~1~1~VCC~102 100 198 100~ggeTRACK1~0",
+    "TRACK~1~10~~50 50 300 50 300 200 50 200 50 50~ggeOUTLINE~0",
+    "VIA~102~100~2~VCC~1~ggeV1~0"
+  ]
+}

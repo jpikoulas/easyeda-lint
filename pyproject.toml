@@ -4,11 +4,53 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "easyeda-lint"
-version = "0.1.0"
-description = "Sanity-check EasyEDA schematic and PCB JSON exports"
+version = "0.2.1"
+description = "Sanity-check EasyEDA schematic and PCB JSON exports before fabrication."
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
 authors = [{ name = "John Pikoulas" }]
+keywords = [
+    "eda",
+    "pcb",
+    "schematic",
+    "linter",
+    "static-analysis",
+    "easyeda",
+    "jlcpcb",
+    "lceda",
+    "hardware",
+    "electronics",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Manufacturing",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+    "Topic :: Software Development :: Quality Assurance",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/jpikoulas/easyeda-lint"
+Repository = "https://github.com/jpikoulas/easyeda-lint"
+Issues = "https://github.com/jpikoulas/easyeda-lint/issues"
+Changelog = "https://github.com/jpikoulas/easyeda-lint/releases"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "pytest-cov>=4",
+    "ruff>=0.5",
+]
 
 [project.scripts]
 easyeda-lint = "easyeda_lint.cli:main"
@@ -16,3 +58,23 @@ easyeda-lint = "easyeda_lint.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["easyeda_lint*"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# Sensible starter rule set; adjust as the codebase evolves.
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    "E501",   # long lines — we allow long strings in check messages
+    "B008",   # function-call in default arg (fine for stdlib types like Path)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B", "E402"]
