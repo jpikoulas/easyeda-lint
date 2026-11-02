@@ -74,39 +74,6 @@ In EasyEDA Standard: **File → EasyEDA File Source** or **Document → Save
 Source File** exports the JSON representation of the current schematic or PCB.
 Point `easyeda-lint` at those files.
 
-## Fix mode (v0.2)
-
-`--fix` can auto-correct a narrow, safe subset of findings. Schematic is
-treated as the source of truth; the PCB is what gets rewritten.
-
-```bash
-# DRY-RUN — show what would change, write nothing
-easyeda-lint schematic.json pcb.json --fix
-
-# Actually write the corrections
-easyeda-lint schematic.json pcb.json --fix --apply
-```
-
-Output goes to `<input>.fixed.json`; the original PCB is never overwritten.
-After writing, the fixed file is re-linted and the run fails (deleting the
-output) if any new finding appears — a broken fix should never survive.
-
-Two categories, both enabled by default. Filter with a comma-separated list:
-
-| Category | What it does |
-|----------|--------------|
-| `orphan-vias` | Delete vias with no net and no track anywhere near them — the debris left behind by re-routing. |
-| `sync-rename-pairs` | When the cross-check finds a designator drift (same part & package, only-candidate on each side), rewrite the PCB to match the schematic. Auto-generated net names of the form `<old>_<n>` follow the rename. |
-
-```bash
-easyeda-lint sch.json pcb.json --fix orphan-vias --apply       # only orphan vias
-easyeda-lint sch.json pcb.json --fix sync-rename-pairs --apply # only renames
-```
-
-Everything else — missing values, missing decoupling, package drift, unrouted
-pins — stays report-only. Those need human judgement, and a linter that
-guesses wrong is worse than one that just tells you.
-
 ## Example output
 
 ```
